@@ -47,6 +47,7 @@
 # Revision History
 # 2020-12-01: Added support for macOS Big Sur
 # 2021-02-24: Fixed missing variables
+# 2022-02-01: Changed the authentication to bearer token
 #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
