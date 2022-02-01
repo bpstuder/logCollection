@@ -57,6 +57,10 @@ jamfProPassEnc="$6"
 logFiles="$7"
 
 ## System Variables
+if [[ -z $jamfProURL ]]; then
+    jamfProURL=$(/usr/bin/defaults read /Library/Preferences/com.jamfsoftware.jamf jss_url)
+    jamfProURL=${jamfProURL%%/}
+fi
 mySerial=$( system_profiler SPHardwareDataType | grep Serial |  awk '{print $NF}' )
 currentUser=$( stat -f%Su /dev/console )
 compHostName=$( scutil --get LocalHostName )
@@ -65,19 +69,79 @@ osMajor=$(/usr/bin/sw_vers -productVersion | awk -F . '{print $1}')
 osMinor=$(/usr/bin/sw_vers -productVersion | awk -F . '{print $2}')
 jamfProPass=$( echo "$6" | /usr/bin/openssl enc -aes256 -d -a -A -S "$8" -k "$9" )
 
+echo "Connecting to $jamfProURL"
+
+# created base64-encoded credentials
+encodedCredentials=$( printf "${jamfProUser}:${jamfProPass}" | /usr/bin/iconv -t ISO-8859-1 | /usr/bin/base64 -i - )
+# generate an auth token
+authToken=$( /usr/bin/curl "$jamfProURL/api/auth/tokens" \
+--silent \
+--request POST \
+--header "Authorization: Basic $encodedCredentials" \
+--header "Content-Length: 0" \
+-w "\n%{http_code}")
+
+httpCode=$(tail -n1 <<< "${authToken}")
+httpBody=$(sed '$ d' <<< "${authToken}") 
+
+echo "Command HTTP result : ${httpCode}"
+# echo "Response : ${httpBody}"
+
+if [[ ${httpCode} == 200 ]]; then 
+    echo "Token creation done"
+else
+    echo "[ERROR] Unable to create token. Curl code received : ${httpCode}"
+    exit 1
+fi
+
+# parse authToken for token, omit expiration
+token=$( awk -F \" '{ print $4 }' <<< "$authToken" | xargs )
+
 ## Log Collection
+echo "Collecting logs"
 fileName=$compHostName-$currentUser-$timeStamp.zip
-zip /private/tmp/$fileName $logFiles
+echo "Zipping logs"
+zip /private/tmp/$fileName $logFiles > /dev/null
 
 ## Upload Log File
 if [[ "$osMajor" -ge 11 ]]; then
-    jamfProID=$( curl -k -u "$jamfProUser":"$jamfProPass" $jamfProURL/JSSResource/computers/serialnumber/$mySerial/subset/general | xpath -e "//computer/general/id/text()" )
+    jamfProID=$( curl -sk \
+        -H "Authorization: Bearer ${token}" \
+        $jamfProURL/JSSResource/computers/serialnumber/$mySerial/subset/general | \
+        xpath -e "//computer/general/id/text()" -q )
 elif [[ "$osMajor" -eq 10 && "$osMinor" -gt 12 ]]; then
-    jamfProID=$( curl -k -u "$jamfProUser":"$jamfProPass" $jamfProURL/JSSResource/computers/serialnumber/$mySerial/subset/general | xpath "//computer/general/id/text()" )
+    jamfProID=$( curl -sk -u "$jamfProUser":"$jamfProPass" \
+        -H "Authorization: Bearer ${token}" \
+        $jamfProURL/JSSResource/computers/serialnumber/$mySerial/subset/general | \
+        xpath "//computer/general/id/text()" -q )
 fi
 
-curl -k -u "$jamfProUser":"$jamfProPass" $jamfProURL/JSSResource/fileuploads/computers/id/$jamfProID -F name=@/private/tmp/$fileName -X POST
+echo "Uploading files"
+curl -sk \
+    -H "Authorization: Bearer ${token}" \
+    $jamfProURL/JSSResource/fileuploads/computers/id/$jamfProID \
+    -F name=@/private/tmp/$fileName \
+    -X POST
 
 ## Cleanup
-rm /private/tmp/$fileName
+echo "Deleting temp files"
+rm /private/tmp/$fileName 
+
+# expire the auth token
+echo "Expiring Token"
+result=$(/usr/bin/curl "$jamfProURL/api/auth/invalidateToken" \
+--silent \
+--request POST \
+--header "Authorization: Bearer $token" \
+--header "Content-Length: 0" \
+-w "\n%{http_code}")
+httpCode=$(tail -n1 <<< "${result}")
+
+if [[ ${httpCode} == 204 ]]; then 
+    echo "Command HTTP result : ${httpCode}"
+    echo ">> Done"
+else
+    echo "[ERROR] Unable to expire token. Curl code received : ${httpCode}"
+fi
+
 exit 0
